@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import create_access_token, decode_access_token, code_expired, code_valid_for_seconds
 from config import AUTO_APPROVE_FIRST_USER
 from database import get_db
-from email_service import generate_code, send_verification_code
+from email_service import generate_code, send_verification_code, notify_admins_pending_approval
 from models import Meeting, PulsePoll, PulseOption, PulseVote, Question, QuestionVote, User
 
 router = APIRouter(prefix="/api", tags=["api"])
@@ -162,10 +162,9 @@ async def api_signup_verify(body: VerifyBody, response: Response, request: Reque
     count_r = await db.execute(select(func.count(User.id)))
     total = count_r.scalar() or 0
     if total <= 1:
+        # First ever user → auto admin + approved
         user.is_approved = True
         user.is_admin = True
-    elif AUTO_APPROVE_FIRST_USER:
-        user.is_approved = True
     user.verification_code = None
     user.code_expires_at = None
     user.code_attempts = 0
@@ -176,6 +175,10 @@ async def api_signup_verify(body: VerifyBody, response: Response, request: Reque
         logger.info("SIGNUP_COMPLETE email=%s is_admin=%s", email, user.is_admin)
         return {"user": _user_dict(user)}
     logger.info("SIGNUP_PENDING_APPROVAL email=%s", email)
+    # Notify all admins by email so they don't miss the approval request
+    admin_r = await db.execute(select(User.email).where(User.is_admin == True, User.is_approved == True))
+    admin_emails = [row[0] for row in admin_r.fetchall()]
+    await notify_admins_pending_approval(admin_emails, user.name or "", email)
     return {"step": "pending_approval", "message": "Account verified. Wait for admin approval."}
 
 
